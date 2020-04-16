@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/andygrunwald/go-jira"
 )
@@ -21,6 +22,16 @@ func deleteLink(jc *jira.Client, linkId string) error {
 	}
 
 	return nil
+}
+
+func shouldShow(i *jira.Issue) bool {
+	if strings.ToLower(i.Fields.Status.Name) == strings.ToLower("Ready for Dev") {
+		return true
+	}
+	if strings.ToLower(i.Fields.Status.Name) == strings.ToLower("In Progress") {
+		return true
+	}
+	return false
 }
 
 func main() {
@@ -109,25 +120,35 @@ func main() {
 				}
 			}
 		}
-	}
-
-	if false {
-		critical, _, err := jc.Issue.Search("priority = 'Highest'", nil)
+	} else {
+		epics, _, err := jc.Issue.Search("type = 'Epic' AND resolution IS EMPTY ORDER BY dueDate DESC", nil)
 		if err != nil {
 			log.Fatalf("error getting issues: %+v", err)
 		}
 
-		fmt.Printf("%+v\n", critical)
+		for _, i := range epics {
+			fmt.Printf("%+v %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
 
-		for _, i := range critical {
-			log.Printf("%+v", i.Fields)
+			for _, link := range i.Fields.IssueLinks {
+				if link.InwardIssue != nil {
+					if link.InwardIssue.Fields.Resolution == nil {
+						i := link.InwardIssue
+						if shouldShow(i) {
+							fmt.Printf("  %s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+						}
+					}
+				}
+				if link.OutwardIssue != nil {
+					if link.OutwardIssue.Fields.Resolution == nil {
+						i := link.OutwardIssue
+						if shouldShow(i) {
+							fmt.Printf("  %s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+						}
+					}
+				}
+			}
+
+			fmt.Println()
 		}
-
-		blocked, _, err := jc.Issue.Search("status = 'Blocked'", nil)
-		if err != nil {
-			log.Fatalf("error getting issues: %+v", err)
-		}
-
-		fmt.Printf("%+v\n", blocked)
 	}
 }
