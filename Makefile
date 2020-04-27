@@ -8,3 +8,6 @@ build/jira-status: *.go
 
 clean:
 	rm -rf build
+
+install: all
+	cp build/jira-status ~/tools/bin
