@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/andygrunwald/go-jira"
@@ -34,6 +35,25 @@ func shouldShow(i *jira.Issue) bool {
 	return false
 }
 
+func findEpic(jc *jira.Client, options *Options) (string, error) {
+	number, err := strconv.Atoi(options.Epic)
+	if err == nil {
+		return fmt.Sprintf("%s-%d", options.Project, number), nil
+	}
+
+	epics, _, err := jc.Issue.Search(fmt.Sprintf("type = 'Epic' AND resolution IS EMPTY AND summary ~ \"%s*\" ORDER BY dueDate DESC", options.Epic), nil)
+	if err != nil {
+		log.Fatalf("error getting issues: %+v", err)
+	}
+
+	for _, e := range epics {
+		log.Printf("found %s '%s'", e.Key, e.Fields.Summary)
+		return e.Key, nil
+	}
+
+	return "", fmt.Errorf("unable to find Epic matching '%s'", options.Epic)
+}
+
 func main() {
 	options := &Options{}
 	flag.StringVar(&options.Project, "project", "FK", "project prefix")
@@ -52,7 +72,10 @@ func main() {
 	}
 
 	if len(options.Epic) > 0 {
-		desiredKey := fmt.Sprintf("%s-%s", options.Project, options.Epic)
+		desiredKey, err := findEpic(jc, options)
+		if err != nil {
+			log.Fatalf("error: %v", err)
+		}
 
 		types, _, _ := jc.IssueLinkType.GetList()
 		for _, a := range types {
@@ -134,7 +157,11 @@ func main() {
 					if link.InwardIssue.Fields.Resolution == nil {
 						i := link.InwardIssue
 						if shouldShow(i) {
-							fmt.Printf("  %s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+							if i.Fields.Assignee != nil {
+								fmt.Printf("  %s %s (%s) (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name, i.Fields.Assignee.Name)
+							} else {
+								fmt.Printf("  %s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+							}
 						}
 					}
 				}
@@ -142,7 +169,11 @@ func main() {
 					if link.OutwardIssue.Fields.Resolution == nil {
 						i := link.OutwardIssue
 						if shouldShow(i) {
-							fmt.Printf("  %s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+							if i.Fields.Assignee != nil {
+								fmt.Printf("  %s %s (%s) (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name, i.Fields.Assignee.Name)
+							} else {
+								fmt.Printf("  %s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+							}
 						}
 					}
 				}
