@@ -4,8 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/andygrunwald/go-jira"
 )
@@ -13,6 +15,8 @@ import (
 type Options struct {
 	Project string
 	Epic    string
+	Upkeep  bool
+	Daemon  bool
 }
 
 func deleteLink(jc *jira.Client, linkId string) error {
@@ -172,10 +176,66 @@ func displayIssues(jc *jira.Client, options *Options) error {
 	return nil
 }
 
+var imagesRegexp = regexp.MustCompile("!.+!")
+
+func makeAllImagesThumbnails(body string) (string, error) {
+	newBody := imagesRegexp.ReplaceAllStringFunc(body, func(match string) string {
+		pipes := strings.Split(match, "|")
+		if len(pipes) == 2 {
+			return match
+		}
+
+		nameOnly := strings.Replace(match, "!", "", -1)
+
+		return fmt.Sprintf("!%s|thumbnail!", nameOnly)
+	})
+
+	return newBody, nil
+}
+
+func upkeep(jc *jira.Client, options *Options) error {
+	issues, _, err := jc.Issue.Search("resolution IS EMPTY ORDER BY updated DESC", nil)
+	if err != nil {
+		return fmt.Errorf("error getting issues: %+v", err)
+	}
+
+	for _, i := range issues {
+		if false {
+			fmt.Printf("%+v", i.Fields.Description)
+		}
+
+		issue, _, err := jc.Issue.Get(i.Key, nil)
+		if err != nil {
+			return fmt.Errorf("error getting issue: %+v", err)
+		}
+
+		for _, c := range issue.Fields.Comments.Comments {
+			newBody, err := makeAllImagesThumbnails(c.Body)
+			if err != nil {
+				return fmt.Errorf("error changing thumbnails: %+v", err)
+			}
+
+			if newBody != c.Body {
+				fmt.Printf("%+v %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
+
+				c.Body = newBody
+
+				if _, _, err := jc.Issue.UpdateComment(i.Key, c); err != nil {
+					return fmt.Errorf("error updating comment: %+v", err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	options := &Options{}
 	flag.StringVar(&options.Project, "project", "FK", "project prefix")
 	flag.StringVar(&options.Epic, "epic", "", "target epic")
+	flag.BoolVar(&options.Upkeep, "upkeep", false, "upkeep")
+	flag.BoolVar(&options.Daemon, "daemon", false, "daemon")
 	flag.Parse()
 
 	jc, err := jira.NewClient(nil, JiraUrl)
@@ -187,6 +247,23 @@ func main() {
 	res, err := jc.Authentication.AcquireSessionCookie(JiraUsername, JiraPassword)
 	if err != nil || res == false {
 		log.Fatalf("error authenticating: %+v", err)
+	}
+
+	if options.Upkeep {
+		for {
+			log.Printf("querying for issues")
+
+			if err := upkeep(jc, options); err != nil {
+				log.Fatalf("error: %v", err)
+			}
+
+			if options.Daemon {
+				time.Sleep(1 * time.Minute)
+			} else {
+				break
+			}
+		}
+		return
 	}
 
 	if len(options.Epic) > 0 {
