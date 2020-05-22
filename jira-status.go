@@ -209,6 +209,26 @@ func upkeep(jc *jira.Client, options *Options) error {
 			return fmt.Errorf("error getting issue: %+v", err)
 		}
 
+		newDescription, err := makeAllImagesThumbnails(i.Fields.Description)
+		if err != nil {
+			return fmt.Errorf("error changing thumbnails: %+v", err)
+		}
+
+		if newDescription != i.Fields.Description {
+			fmt.Printf("%+v %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
+
+			update := &jira.Issue{
+				Key: i.Key,
+				Fields: &jira.IssueFields{
+					Description: newDescription,
+				},
+			}
+
+			if _, _, err := jc.Issue.Update(update); err != nil {
+				return fmt.Errorf("error updating description: %+v", err)
+			}
+		}
+
 		for _, c := range issue.Fields.Comments.Comments {
 			newBody, err := makeAllImagesThumbnails(c.Body)
 			if err != nil {
@@ -221,7 +241,7 @@ func upkeep(jc *jira.Client, options *Options) error {
 				c.Body = newBody
 
 				if _, _, err := jc.Issue.UpdateComment(i.Key, c); err != nil {
-					return fmt.Errorf("error updating comment: %+v", err)
+					return fmt.Errorf("error updating: %+v", err)
 				}
 			}
 		}
