@@ -15,8 +15,10 @@ import (
 type Options struct {
 	Project string
 	Epic    string
+	Epics   bool
 	Upkeep  bool
 	Daemon  bool
+	Pending bool
 }
 
 func deleteLink(jc *jira.Client, linkId string) error {
@@ -128,6 +130,23 @@ func linkEpics(jc *jira.Client, options *Options) error {
 			if err != nil {
 				return fmt.Errorf("error: %v", err)
 			}
+		}
+	}
+
+	return nil
+}
+
+func displaySearch(jc *jira.Client, search string) error {
+	issues, _, err := jc.Issue.Search(search, nil)
+	if err != nil {
+		return fmt.Errorf("error getting issues: %+v", err)
+	}
+
+	for _, i := range issues {
+		if i.Fields.Assignee != nil {
+			fmt.Printf("%s %s (%s) (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name, i.Fields.Assignee.Name)
+		} else {
+			fmt.Printf("%s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
 		}
 	}
 
@@ -254,8 +273,10 @@ func main() {
 	options := &Options{}
 	flag.StringVar(&options.Project, "project", "FK", "project prefix")
 	flag.StringVar(&options.Epic, "epic", "", "target epic")
+	flag.BoolVar(&options.Epics, "epics", false, "epics")
 	flag.BoolVar(&options.Upkeep, "upkeep", false, "upkeep")
 	flag.BoolVar(&options.Daemon, "daemon", false, "daemon")
+	flag.BoolVar(&options.Pending, "pending", false, "pending")
 	flag.Parse()
 
 	jc, err := jira.NewClient(nil, JiraUrl)
@@ -286,13 +307,30 @@ func main() {
 		return
 	}
 
+	if options.Pending {
+		search := `status IN ("Ready to Deploy")`
+		if err := displaySearch(jc, search); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
 	if len(options.Epic) > 0 {
 		if err := linkEpics(jc, options); err != nil {
 			log.Fatalf("error: %v", err)
 		}
 	} else {
-		if err := displayIssues(jc, options); err != nil {
-			log.Fatalf("error: %v", err)
+		if options.Epics {
+			if err := displayIssues(jc, options); err != nil {
+				log.Fatalf("error: %v", err)
+			}
+		} else {
+			search := `status NOT IN ("Awaiting QA") AND
+				       type != Epic AND resolution is EMPTY AND
+				       (assignee = currentUser() OR assignee WAS currentUser() OR reporter = currentUser() OR comment ~ currentUser() OR watcher = currentUser()) ORDER BY updated DESC`
+			if err := displaySearch(jc, search); err != nil {
+				log.Fatalf("error: %v", err)
+			}
 		}
 	}
 }
