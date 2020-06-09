@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/andygrunwald/go-jira"
 )
@@ -15,10 +14,11 @@ import (
 type Options struct {
 	Project string
 	Epic    string
+	Version string
 	Epics   bool
 	Upkeep  bool
-	Daemon  bool
 	Pending bool
+	Help    bool
 }
 
 func deleteLink(jc *jira.Client, linkId string) error {
@@ -144,9 +144,9 @@ func displaySearch(jc *jira.Client, search string) error {
 
 	for _, i := range issues {
 		if i.Fields.Assignee != nil {
-			fmt.Printf("%s %s (%s) (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name, i.Fields.Assignee.Name)
+			fmt.Printf("%-8s %s (%s) (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name, i.Fields.Assignee.Name)
 		} else {
-			fmt.Printf("%s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
+			fmt.Printf("%-8s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
 		}
 	}
 
@@ -160,7 +160,7 @@ func displayIssues(jc *jira.Client, options *Options) error {
 	}
 
 	for _, i := range epics {
-		fmt.Printf("%+v %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
+		fmt.Printf("%-8s %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
 
 		for _, link := range i.Fields.IssueLinks {
 			if link.InwardIssue != nil {
@@ -212,6 +212,77 @@ func makeAllImagesThumbnails(body string) (string, error) {
 	return newBody, nil
 }
 
+func findVersion(jc *jira.Client, projectKey, search string) (version *jira.Version, err error) {
+	project, _, err := jc.Project.Get(projectKey)
+	if err != nil {
+		return nil, err
+	}
+
+	matches := make([]jira.Version, 0)
+
+	for _, v := range project.Versions {
+		if !v.Archived && !v.Released {
+			if strings.Contains(v.Name, search) {
+				matches = append(matches, v)
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no such version in project: %s / %s", projectKey, search)
+	}
+
+	return &matches[0], nil
+}
+
+func reversion(jc *jira.Client, options *Options) error {
+	version, err := findVersion(jc, options.Project, options.Version)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("version: %v", version.Name)
+
+	for _, issueNumber := range flag.Args() {
+		issueKey := fmt.Sprintf("%s-%s", options.Project, issueNumber)
+
+		issue, _, err := jc.Issue.Get(issueKey, nil)
+		if err != nil {
+			return fmt.Errorf("error getting issue: %+v", err)
+		}
+
+		necessary := true
+
+		for _, fv := range issue.Fields.FixVersions {
+			if fv.ID == version.ID {
+				necessary = false
+				break
+			}
+		}
+
+		if necessary {
+			log.Printf("moving %s to version %s", issueKey, version.Name)
+
+			update := &jira.Issue{
+				Key: issue.Key,
+				Fields: &jira.IssueFields{
+					FixVersions: []*jira.FixVersion{
+						&jira.FixVersion{
+							ID: version.ID,
+						},
+					},
+				},
+			}
+
+			if _, _, err := jc.Issue.Update(update); err != nil {
+				return fmt.Errorf("error updating description: %+v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func upkeep(jc *jira.Client, options *Options) error {
 	issues, _, err := jc.Issue.Search("resolution IS EMPTY ORDER BY updated DESC", nil)
 	if err != nil {
@@ -234,7 +305,7 @@ func upkeep(jc *jira.Client, options *Options) error {
 		}
 
 		if newDescription != i.Fields.Description {
-			fmt.Printf("%+v %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
+			fmt.Printf("%-8s %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
 
 			update := &jira.Issue{
 				Key: i.Key,
@@ -271,13 +342,20 @@ func upkeep(jc *jira.Client, options *Options) error {
 
 func main() {
 	options := &Options{}
-	flag.StringVar(&options.Project, "project", "FK", "project prefix")
+	flag.StringVar(&options.Project, "project", "FK", "default project prefix, should rarely change")
+	flag.StringVar(&options.Version, "version", "", "version to link issues to")
+	flag.BoolVar(&options.Upkeep, "upkeep", false, "fix thumbnails on recently modified issues")
+	flag.BoolVar(&options.Pending, "pending", false, "issues ready for deploy")
+	flag.BoolVar(&options.Help, "help", false, "help")
+	// Deprecating
 	flag.StringVar(&options.Epic, "epic", "", "target epic")
 	flag.BoolVar(&options.Epics, "epics", false, "epics")
-	flag.BoolVar(&options.Upkeep, "upkeep", false, "upkeep")
-	flag.BoolVar(&options.Daemon, "daemon", false, "daemon")
-	flag.BoolVar(&options.Pending, "pending", false, "pending")
 	flag.Parse()
+
+	if options.Help {
+		flag.Usage()
+		return
+	}
 
 	jc, err := jira.NewClient(nil, JiraUrl)
 	if err != nil {
@@ -291,18 +369,10 @@ func main() {
 	}
 
 	if options.Upkeep {
-		for {
-			log.Printf("querying for issues")
+		log.Printf("querying for issues")
 
-			if err := upkeep(jc, options); err != nil {
-				log.Fatalf("error: %v", err)
-			}
-
-			if options.Daemon {
-				time.Sleep(1 * time.Minute)
-			} else {
-				break
-			}
+		if err := upkeep(jc, options); err != nil {
+			log.Fatalf("error: %v", err)
 		}
 		return
 	}
@@ -315,22 +385,34 @@ func main() {
 		return
 	}
 
+	if len(options.Version) > 0 {
+		if err := reversion(jc, options); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+
+		return
+	}
+
 	if len(options.Epic) > 0 {
 		if err := linkEpics(jc, options); err != nil {
 			log.Fatalf("error: %v", err)
 		}
+
+		return
+	}
+
+	if options.Epics {
+		if err := displayIssues(jc, options); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+
+		return
 	} else {
-		if options.Epics {
-			if err := displayIssues(jc, options); err != nil {
-				log.Fatalf("error: %v", err)
-			}
-		} else {
-			search := `status NOT IN ("Awaiting QA") AND
+		search := `status NOT IN ("Awaiting QA") AND
 				       type != Epic AND resolution is EMPTY AND
 				       (assignee = currentUser() OR assignee WAS currentUser() OR reporter = currentUser() OR comment ~ currentUser() OR watcher = currentUser()) ORDER BY updated DESC`
-			if err := displaySearch(jc, search); err != nil {
-				log.Fatalf("error: %v", err)
-			}
+		if err := displaySearch(jc, search); err != nil {
+			log.Fatalf("error: %v", err)
 		}
 	}
 }
