@@ -241,7 +241,9 @@ func reversion(jc *jira.Client, options *Options) error {
 		return err
 	}
 
-	log.Printf("version: %v", version.Name)
+	if false {
+		log.Printf("version: %v", version.Name)
+	}
 
 	for _, issueNumber := range flag.Args() {
 		issueKey := fmt.Sprintf("%s-%s", options.Project, issueNumber)
