@@ -45,11 +45,7 @@ func displaySearch(jc *jira.Client, search string) error {
 	}
 
 	for _, i := range issues {
-		if i.Fields.Assignee != nil {
-			fmt.Printf("%-8s %s (%s) (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name, i.Fields.Assignee.Name)
-		} else {
-			fmt.Printf("%-8s %s (%s)\n", i.Key, i.Fields.Summary, i.Fields.Status.Name)
-		}
+		fmt.Printf("%-8s %-18s %s\n", i.Key, i.Fields.Status.Name, i.Fields.Summary)
 	}
 
 	return nil
@@ -294,9 +290,12 @@ func main() {
 		return
 	}
 
-	search := `status NOT IN ("Awaiting QA") AND
-				       type != Epic AND resolution is EMPTY AND
-				       (assignee = currentUser() OR assignee WAS currentUser() OR reporter = currentUser() OR comment ~ currentUser() OR watcher = currentUser()) ORDER BY updated DESC`
+	search := `(status NOT IN ("Awaiting QA")) AND
+			   (type != Epic) AND
+			   (resolution is EMPTY) AND
+			   (project IN ('FK')) AND
+			   (assignee = currentUser() OR assignee WAS currentUser() OR reporter = currentUser() OR comment ~ currentUser() OR watcher = currentUser())
+		       ORDER BY updated DESC`
 	if err := displaySearch(jc, search); err != nil {
 		log.Fatalf("error: %v", err)
 	}
