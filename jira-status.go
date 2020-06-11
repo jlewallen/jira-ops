@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/andygrunwald/go-jira"
@@ -13,9 +12,7 @@ import (
 
 type Options struct {
 	Project string
-	Epic    string
 	Version string
-	Epics   bool
 	Upkeep  bool
 	Pending bool
 	Help    bool
@@ -39,101 +36,6 @@ func shouldShow(i *jira.Issue) bool {
 		return true
 	}
 	return false
-}
-
-func findEpic(jc *jira.Client, options *Options) (string, error) {
-	number, err := strconv.Atoi(options.Epic)
-	if err == nil {
-		return fmt.Sprintf("%s-%d", options.Project, number), nil
-	}
-
-	epics, _, err := jc.Issue.Search(fmt.Sprintf("type = 'Epic' AND resolution IS EMPTY AND summary ~ \"%s*\" ORDER BY dueDate DESC", options.Epic), nil)
-	if err != nil {
-		log.Fatalf("error getting issues: %+v", err)
-	}
-
-	for _, e := range epics {
-		log.Printf("found %s '%s'", e.Key, e.Fields.Summary)
-		return e.Key, nil
-	}
-
-	return "", fmt.Errorf("unable to find Epic matching '%s'", options.Epic)
-}
-
-func linkEpics(jc *jira.Client, options *Options) error {
-	desiredKey, err := findEpic(jc, options)
-	if err != nil {
-		return err
-	}
-
-	types, _, _ := jc.IssueLinkType.GetList()
-	for _, a := range types {
-		log.Printf("OK: ", a)
-	}
-
-	for _, issueNumber := range flag.Args() {
-		issueKey := fmt.Sprintf("%s-%s", options.Project, issueNumber)
-
-		log.Printf("moving %s to epic %s", issueKey, desiredKey)
-
-		issue, _, err := jc.Issue.Get(issueKey, nil)
-		if err != nil {
-			return fmt.Errorf("error getting issue: %+v", err)
-		}
-
-		linked := false
-
-		for _, link := range issue.Fields.IssueLinks {
-			if link.InwardIssue != nil {
-				if link.InwardIssue.Key == desiredKey {
-					linked = true
-				} else {
-					if link.InwardIssue.Fields.Type.Name == "Epic" {
-						log.Printf("removing (inward) link to: %s", link.InwardIssue.Key)
-						err := deleteLink(jc, link.ID)
-						if err != nil {
-							return fmt.Errorf("error: %v", err)
-						}
-					}
-				}
-			}
-			if link.OutwardIssue != nil {
-				if link.OutwardIssue.Key == desiredKey {
-					linked = true
-				} else {
-					if link.OutwardIssue.Fields.Type.Name == "Epic" {
-						log.Printf("removing (outward) link to: %s", link.OutwardIssue.Key)
-						err := deleteLink(jc, link.ID)
-						if err != nil {
-							return fmt.Errorf("error: %v", err)
-						}
-					}
-				}
-			}
-		}
-
-		if !linked {
-			log.Printf("adding link from %s to %s", issueKey, desiredKey)
-
-			newLink := &jira.IssueLink{
-				Type: jira.IssueLinkType{
-					Name: "Relates",
-				},
-				InwardIssue: &jira.Issue{
-					Key: desiredKey,
-				},
-				OutwardIssue: &jira.Issue{
-					Key: issueKey,
-				},
-			}
-			_, err := jc.Issue.AddLink(newLink)
-			if err != nil {
-				return fmt.Errorf("error: %v", err)
-			}
-		}
-	}
-
-	return nil
 }
 
 func displaySearch(jc *jira.Client, search string) error {
@@ -349,9 +251,6 @@ func main() {
 	flag.BoolVar(&options.Upkeep, "upkeep", false, "fix thumbnails on recently modified issues")
 	flag.BoolVar(&options.Pending, "pending", false, "issues ready for deploy")
 	flag.BoolVar(&options.Help, "help", false, "help")
-	// Deprecating
-	flag.StringVar(&options.Epic, "epic", "", "target epic")
-	flag.BoolVar(&options.Epics, "epics", false, "epics")
 	flag.Parse()
 
 	if options.Help {
@@ -395,26 +294,10 @@ func main() {
 		return
 	}
 
-	if len(options.Epic) > 0 {
-		if err := linkEpics(jc, options); err != nil {
-			log.Fatalf("error: %v", err)
-		}
-
-		return
-	}
-
-	if options.Epics {
-		if err := displayIssues(jc, options); err != nil {
-			log.Fatalf("error: %v", err)
-		}
-
-		return
-	} else {
-		search := `status NOT IN ("Awaiting QA") AND
+	search := `status NOT IN ("Awaiting QA") AND
 				       type != Epic AND resolution is EMPTY AND
 				       (assignee = currentUser() OR assignee WAS currentUser() OR reporter = currentUser() OR comment ~ currentUser() OR watcher = currentUser()) ORDER BY updated DESC`
-		if err := displaySearch(jc, search); err != nil {
-			log.Fatalf("error: %v", err)
-		}
+	if err := displaySearch(jc, search); err != nil {
+		log.Fatalf("error: %v", err)
 	}
 }
