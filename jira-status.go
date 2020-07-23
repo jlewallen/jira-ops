@@ -11,11 +11,13 @@ import (
 )
 
 type Options struct {
-	Project string
-	Version string
-	Upkeep  bool
-	Pending bool
-	Help    bool
+	Project        string
+	Version        string
+	Upkeep         bool
+	Pending        bool
+	DeployedPortal bool
+	DeployedApp    bool
+	Help           bool
 }
 
 func deleteLink(jc *jira.Client, linkId string) error {
@@ -189,6 +191,8 @@ func upkeep(jc *jira.Client, options *Options) error {
 		return fmt.Errorf("error getting issues: %+v", err)
 	}
 
+	enabled := true
+
 	for _, i := range issues {
 		if false {
 			fmt.Printf("%+v", i.Fields.Description)
@@ -214,8 +218,13 @@ func upkeep(jc *jira.Client, options *Options) error {
 				},
 			}
 
-			if _, _, err := jc.Issue.Update(update); err != nil {
-				return fmt.Errorf("error updating description: %+v", err)
+			if enabled {
+				if _, _, err := jc.Issue.Update(update); err != nil {
+					return fmt.Errorf("error updating description: %+v", err)
+				}
+			} else {
+				fmt.Printf("OLD: %v\n", i.Fields.Description)
+				fmt.Printf("NEW: %v\n", newDescription)
 			}
 		}
 
@@ -228,12 +237,42 @@ func upkeep(jc *jira.Client, options *Options) error {
 			if newBody != c.Body {
 				fmt.Printf("%+v %v (%d linked)\n", i.Key, i.Fields.Summary, len(i.Fields.IssueLinks))
 
-				c.Body = newBody
-
-				if _, _, err := jc.Issue.UpdateComment(i.Key, c); err != nil {
-					return fmt.Errorf("error updating: %+v", err)
+				if enabled {
+					c.Body = newBody
+					if _, _, err := jc.Issue.UpdateComment(i.Key, c); err != nil {
+						return fmt.Errorf("error updating: %+v", err)
+					}
+				} else {
+					fmt.Printf("OLD: %v\n", c.Body)
+					fmt.Printf("NEW: %v\n", newBody)
 				}
 			}
+		}
+	}
+
+	return nil
+}
+
+func changeStatus(jc *jira.Client, options *Options, search, newStatus string) error {
+	issues, _, err := jc.Issue.Search(search, nil)
+	if err != nil {
+		return fmt.Errorf("error getting issues: %+v", err)
+	}
+
+	for _, i := range issues {
+		fmt.Printf("%-8s %-18s %s\n", i.Key, i.Fields.Status.Name, i.Fields.Summary)
+
+		update := &jira.Issue{
+			Key: i.Key,
+			Fields: &jira.IssueFields{
+				Status: &jira.Status{
+					Name: newStatus,
+				},
+			},
+		}
+
+		if _, _, err := jc.Issue.Update(update); err != nil {
+			return fmt.Errorf("error updating description: %+v", err)
 		}
 	}
 
@@ -246,6 +285,8 @@ func main() {
 	flag.StringVar(&options.Version, "version", "", "version to link issues to")
 	flag.BoolVar(&options.Upkeep, "upkeep", false, "fix thumbnails on recently modified issues")
 	flag.BoolVar(&options.Pending, "pending", false, "issues ready for deploy")
+	flag.BoolVar(&options.DeployedPortal, "deployed-portal", false, "deployed portal")
+	flag.BoolVar(&options.DeployedApp, "deployed-app", false, "deployed app")
 	flag.BoolVar(&options.Help, "help", false, "help")
 	flag.Parse()
 
@@ -275,8 +316,24 @@ func main() {
 	}
 
 	if options.Pending {
-		search := `status IN ("Ready to Deploy")`
+		search := `status IN ("Ready for Deploy")`
 		if err := displaySearch(jc, search); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
+	if options.DeployedPortal {
+		search := `status IN ("Ready for Deploy") AND component IN ("Portal", "Backend")`
+		if err := changeStatus(jc, options, search, "Awaiting QA"); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
+	if options.DeployedApp {
+		search := `status IN ("Ready for Deploy") AND component IN ("Mobile App")`
+		if err := changeStatus(jc, options, search, "Awaiting QA"); err != nil {
 			log.Fatalf("error: %v", err)
 		}
 		return
