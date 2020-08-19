@@ -13,11 +13,22 @@ import (
 type Options struct {
 	Project        string
 	Version        string
+	Search         string
 	Upkeep         bool
 	Pending        bool
+	Progress       bool
 	DeployedPortal bool
 	DeployedApp    bool
 	Help           bool
+	Pull           string
+}
+
+func echoIssueActionMessage(action string, issue *jira.Issue) {
+	log.Printf("%v %v: '%v'\n", action, issue.Key, issue.Fields.Summary)
+}
+
+func echoIssueStatusMessage(issue *jira.Issue) {
+	fmt.Printf("%-8s %-18s %s\n", issue.Key, issue.Fields.Status.Name, issue.Fields.Summary)
 }
 
 func deleteLink(jc *jira.Client, linkId string) error {
@@ -46,8 +57,8 @@ func displaySearch(jc *jira.Client, search string) error {
 		return fmt.Errorf("error getting issues: %+v", err)
 	}
 
-	for _, i := range issues {
-		fmt.Printf("%-8s %-18s %s\n", i.Key, i.Fields.Status.Name, i.Fields.Summary)
+	for _, issue := range issues {
+		echoIssueStatusMessage(&issue)
 	}
 
 	return nil
@@ -95,7 +106,7 @@ func displayIssues(jc *jira.Client, options *Options) error {
 	return nil
 }
 
-var imagesRegexp = regexp.MustCompile("!.+!")
+var imagesRegexp = regexp.MustCompile("![^!\n]+!")
 
 func makeAllImagesThumbnails(body string) (string, error) {
 	newBody := imagesRegexp.ReplaceAllStringFunc(body, func(match string) string {
@@ -222,10 +233,10 @@ func upkeep(jc *jira.Client, options *Options) error {
 				if _, _, err := jc.Issue.Update(update); err != nil {
 					return fmt.Errorf("error updating description: %+v", err)
 				}
-			} else {
-				fmt.Printf("OLD: %v\n", i.Fields.Description)
-				fmt.Printf("NEW: %v\n", newDescription)
 			}
+
+			fmt.Printf("OLD: '%v'\n", i.Fields.Description)
+			fmt.Printf("NEW: '%v'\n", newDescription)
 		}
 
 		for _, c := range issue.Fields.Comments.Comments {
@@ -242,10 +253,9 @@ func upkeep(jc *jira.Client, options *Options) error {
 					if _, _, err := jc.Issue.UpdateComment(i.Key, c); err != nil {
 						return fmt.Errorf("error updating: %+v", err)
 					}
-				} else {
-					fmt.Printf("OLD: %v\n", c.Body)
-					fmt.Printf("NEW: %v\n", newBody)
 				}
+				fmt.Printf("OLD: '%v'\n", c.Body)
+				fmt.Printf("NEW: '%v'\n", newBody)
 			}
 		}
 	}
@@ -272,17 +282,52 @@ func changeStatus(jc *jira.Client, options *Options, search, newStatus string) e
 		}
 
 		if _, _, err := jc.Issue.Update(update); err != nil {
-			return fmt.Errorf("error updating description: %+v", err)
+			return fmt.Errorf("error updating status: %+v", err)
 		}
 	}
 
 	return nil
 }
 
+func findIssue(jc *jira.Client, search string) (*jira.Issue, error) {
+	issues, _, err := jc.Issue.Search(search, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error getting issues: %+v", err)
+	}
+
+	if len(issues) != 1 {
+		return nil, fmt.Errorf("unable to find issue")
+	}
+
+	return &issues[0], nil
+}
+
+func pullIssue(jc *jira.Client, issue *jira.Issue) error {
+	transitions, _, err := jc.Issue.GetTransitions(issue.ID)
+	if err != nil {
+		return err
+	}
+
+	for _, transition := range transitions {
+		if transition.To.Name == "In Progress" {
+			echoIssueActionMessage("pulling", issue)
+			if _, err := jc.Issue.DoTransition(issue.ID, transition.ID); err != nil {
+				return fmt.Errorf("error updating status: %+v", err)
+			}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("missing transition")
+}
+
 func main() {
 	options := &Options{}
 	flag.StringVar(&options.Project, "project", "FK", "default project prefix, should rarely change")
 	flag.StringVar(&options.Version, "version", "", "version to link issues to")
+	flag.StringVar(&options.Pull, "pull", "", "pull a card to start working")
+	flag.StringVar(&options.Search, "search", "", "search cards")
+	flag.BoolVar(&options.Progress, "progress", false, "display mine in progress")
 	flag.BoolVar(&options.Upkeep, "upkeep", false, "fix thumbnails on recently modified issues")
 	flag.BoolVar(&options.Pending, "pending", false, "issues ready for deploy")
 	flag.BoolVar(&options.DeployedPortal, "deployed-portal", false, "deployed portal")
@@ -310,6 +355,36 @@ func main() {
 		log.Printf("querying for issues")
 
 		if err := upkeep(jc, options); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
+	if options.Progress {
+		search := fmt.Sprintf(`(project = 'FK') AND (status = 'In Progress') AND (assignee = currentUser())`)
+		if err := displaySearch(jc, search); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
+	if options.Search != "" {
+		search := fmt.Sprintf(`(project = 'FK') AND (resolution IS EMPTY) AND (summary ~ '%s*')`, options.Search)
+		// log.Printf("searching: %s", search)
+		if err := displaySearch(jc, search); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
+	if options.Pull != "" {
+		issueKey := fmt.Sprintf("%s-%s", options.Project, options.Pull)
+		search := fmt.Sprintf(`(key = '%s')`, issueKey)
+		issue, err := findIssue(jc, search)
+		if err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		if err := pullIssue(jc, issue); err != nil {
 			log.Fatalf("error: %v", err)
 		}
 		return
