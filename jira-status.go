@@ -263,30 +263,42 @@ func upkeep(jc *jira.Client, options *Options) error {
 	return nil
 }
 
-func changeStatus(jc *jira.Client, options *Options, search, newStatus string) error {
+func changeStatus(jc *jira.Client, options *Options, search, desired string) error {
 	issues, _, err := jc.Issue.Search(search, nil)
 	if err != nil {
 		return fmt.Errorf("error getting issues: %+v", err)
 	}
 
 	for _, i := range issues {
-		fmt.Printf("%-8s %-18s %s\n", i.Key, i.Fields.Status.Name, i.Fields.Summary)
-
-		update := &jira.Issue{
-			Key: i.Key,
-			Fields: &jira.IssueFields{
-				Status: &jira.Status{
-					Name: newStatus,
-				},
-			},
+		if false {
+			fmt.Printf("%-8s %-18s %s\n", i.Key, i.Fields.Status.Name, i.Fields.Summary)
 		}
 
-		if _, _, err := jc.Issue.Update(update); err != nil {
-			return fmt.Errorf("error updating status: %+v", err)
+		if err := changeIssueStatus(jc, &i, desired); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func changeIssueStatus(jc *jira.Client, issue *jira.Issue, desired string) error {
+	transitions, _, err := jc.Issue.GetTransitions(issue.ID)
+	if err != nil {
+		return err
+	}
+
+	for _, transition := range transitions {
+		if transition.To.Name == desired {
+			echoIssueActionMessage("changing", issue)
+			if _, err := jc.Issue.DoTransition(issue.ID, transition.ID); err != nil {
+				return fmt.Errorf("error updating status: %+v", err)
+			}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("missing transition")
 }
 
 func findIssue(jc *jira.Client, search string) (*jira.Issue, error) {
@@ -303,22 +315,7 @@ func findIssue(jc *jira.Client, search string) (*jira.Issue, error) {
 }
 
 func pullIssue(jc *jira.Client, issue *jira.Issue) error {
-	transitions, _, err := jc.Issue.GetTransitions(issue.ID)
-	if err != nil {
-		return err
-	}
-
-	for _, transition := range transitions {
-		if transition.To.Name == "In Progress" {
-			echoIssueActionMessage("pulling", issue)
-			if _, err := jc.Issue.DoTransition(issue.ID, transition.ID); err != nil {
-				return fmt.Errorf("error updating status: %+v", err)
-			}
-			return nil
-		}
-	}
-
-	return fmt.Errorf("missing transition")
+	return changeIssueStatus(jc, issue, "In Progress")
 }
 
 func main() {
@@ -391,7 +388,7 @@ func main() {
 	}
 
 	if options.Pending {
-		search := `status IN ("Ready for Deploy")`
+		search := `status IN ("Ready for Deploy") AND component IN ("Portal", "Backend", "Mobile App")`
 		if err := displaySearch(jc, search); err != nil {
 			log.Fatalf("error: %v", err)
 		}
