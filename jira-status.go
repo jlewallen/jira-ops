@@ -7,6 +7,8 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -205,12 +207,19 @@ func reversion(jc *jira.Client, options *Options) error {
 var spacesRegexp = regexp.MustCompile("[-_]")
 var removeRegexp = regexp.MustCompile("[:\"?'+.`!()]")
 var normalizeRegexp = regexp.MustCompile("\\s+")
+var mirroring = regexp.MustCompile("(\\.txt$|\\.zip$|\\.bin$)")
+var diagnosticsURL = regexp.MustCompile("https://code.conservify.org/diagnostics/?\\?id=([\\S]+)")
 
-type DownloadFunc func(ctx context.Context, directory string) error
+type DownloadFunc func(ctx context.Context) (io.ReadCloser, error)
 
 type MirroredURL struct {
 	Name     string
+	SaveAs   string
 	Download DownloadFunc
+}
+
+func shouldMirror(name string) bool {
+	return mirroring.MatchString(name)
 }
 
 func makeDirectoryName(issue *jira.Issue) string {
@@ -230,15 +239,26 @@ func findExistingDirectory(issue *jira.Issue, files []os.FileInfo) string {
 	return ""
 }
 
-func findInlineURLs(text string) []*MirroredURL {
+func findInlineURLs(issueKey string, text string) []*MirroredURL {
 	urls := make([]*MirroredURL, 0)
+	matches := diagnosticsURL.FindAllStringSubmatch(text, -1)
+	for _, m := range matches {
+		id := m[1]
+		log.Printf("[%s] found diagnostics link id=%s", issueKey, id)
+		urls = append(urls, &MirroredURL{
+			Name:   fmt.Sprintf("diagnostics-%s", id),
+			SaveAs: id + ".zip",
+			Download: func(ctx context.Context) (io.ReadCloser, error) {
+				url := fmt.Sprintf("https://code.conservify.org/diagnostics/archives/%s.zip?token=%s", id, url.QueryEscape(DiagnosticsToken))
+				r, err := http.Get(url)
+				if err != nil {
+					return nil, err
+				}
+				return r.Body, nil
+			},
+		})
+	}
 	return urls
-}
-
-var mirroring = regexp.MustCompile("(\\.txt$|\\.zip$|\\.bin$)")
-
-func shouldMirror(name string) bool {
-	return mirroring.MatchString(name)
 }
 
 func makeUniqueName(name string, unique string) string {
@@ -248,47 +268,25 @@ func makeUniqueName(name string, unique string) string {
 }
 
 func findAllURLs(jc *jira.Client, issue *jira.Issue) []*MirroredURL {
-	urls := findInlineURLs(issue.Fields.Description)
+	urls := findInlineURLs(issue.Key, issue.Fields.Description)
 	for _, a := range issue.Fields.Attachments {
 		if shouldMirror(a.Filename) {
+			log.Printf("[%s] attached: %+v (considering)", issue.Key, a.Filename)
 			id := a.ID
 			name := a.Filename
-			saveAs := makeUniqueName(a.Filename, a.ID)
 			urls = append(urls, &MirroredURL{
-				Name: name,
-				Download: func(ctx context.Context, directory string) error {
-					fmt.Printf("\t%+v (mirroring)\n", saveAs)
-
-					saveAsFull := path.Join(directory, saveAs)
-
-					_, err := os.Stat(saveAsFull)
-					if os.IsNotExist(err) {
-						r, err := jc.Issue.DownloadAttachmentWithContext(ctx, id)
-						if err != nil {
-							return fmt.Errorf("downloading: %v", err)
-						}
-
-						defer r.Body.Close()
-
-						file, err := os.Create(saveAsFull)
-						if err != nil {
-							return err
-						}
-
-						defer file.Close()
-
-						if _, err := io.Copy(file, r.Body); err != nil {
-							return err
-						}
-					} else if err != nil {
-						return err
+				Name:   name,
+				SaveAs: makeUniqueName(a.Filename, a.ID),
+				Download: func(ctx context.Context) (io.ReadCloser, error) {
+					r, err := jc.Issue.DownloadAttachmentWithContext(ctx, id)
+					if err != nil {
+						return nil, fmt.Errorf("downloading: %v", err)
 					}
-
-					return nil
+					return r.Body, nil
 				},
 			})
 		} else {
-			fmt.Printf("\t%+v (ignore)\n", a.Filename)
+			log.Printf("[%s] attached: %+v (ignoring)", issue.Key, a.Filename)
 		}
 	}
 	return urls
@@ -301,6 +299,7 @@ func mirror(jc *jira.Client, options *Options) error {
 	}
 
 	base := "/home/jlewallen/downloads/jira"
+
 	if err := os.MkdirAll(base, 0755); err != nil {
 		return fmt.Errorf("creating %s: %v", base, err)
 	}
@@ -323,7 +322,7 @@ func mirror(jc *jira.Client, options *Options) error {
 			directoryName = makeDirectoryName(issue)
 		}
 
-		fmt.Printf("%v -> %v (%s)\n", issue.Key, directoryName, issue.Fields.Summary)
+		log.Printf("[%s] dir=%v '%s'", issue.Key, directoryName, issue.Fields.Summary)
 
 		full := path.Join(base, directoryName)
 
@@ -332,8 +331,26 @@ func mirror(jc *jira.Client, options *Options) error {
 		}
 
 		for _, url := range findAllURLs(jc, issue) {
-			if err := url.Download(ctx, full); err != nil {
-				return err
+			saveAsFull := path.Join(full, url.SaveAs)
+			_, err := os.Stat(saveAsFull)
+			if os.IsNotExist(err) {
+				log.Printf("[%s] downloading %s -> %s", issue.Key, url.Name, url.SaveAs)
+				if reader, err := url.Download(ctx); err != nil {
+					return err
+				} else if reader != nil {
+					defer reader.Close()
+
+					file, err := os.Create(saveAsFull)
+					if err != nil {
+						return err
+					}
+
+					defer file.Close()
+
+					if _, err := io.Copy(file, reader); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
