@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
+	"os"
+	"path"
 	"regexp"
 	"strings"
 
@@ -15,6 +20,7 @@ type Options struct {
 	Version        string
 	Search         string
 	Upkeep         bool
+	Mirror         bool
 	Pending        bool
 	Progress       bool
 	DeployedPortal bool
@@ -196,6 +202,145 @@ func reversion(jc *jira.Client, options *Options) error {
 	return nil
 }
 
+var spacesRegexp = regexp.MustCompile("[-_]")
+var removeRegexp = regexp.MustCompile("[:\"?'+.`!()]")
+var normalizeRegexp = regexp.MustCompile("\\s+")
+
+type DownloadFunc func(ctx context.Context, directory string) error
+
+type MirroredURL struct {
+	Name     string
+	Download DownloadFunc
+}
+
+func makeDirectoryName(issue *jira.Issue) string {
+	value := strings.ToLower(fmt.Sprintf("%s_%s", issue.Key, strings.TrimSpace(issue.Fields.Summary)))
+	value = removeRegexp.ReplaceAllLiteralString(value, "")
+	value = spacesRegexp.ReplaceAllLiteralString(value, " ")
+	return normalizeRegexp.ReplaceAllLiteralString(value, "_")
+}
+
+func findExistingDirectory(issue *jira.Issue, files []os.FileInfo) string {
+	prefix := strings.ToLower(fmt.Sprintf("%s", issue.Key))
+	for _, fi := range files {
+		if strings.HasPrefix(strings.ToLower(fi.Name()), prefix) {
+			return fi.Name()
+		}
+	}
+	return ""
+}
+
+func findInlineURLs(text string) []*MirroredURL {
+	urls := make([]*MirroredURL, 0)
+	return urls
+}
+
+var mirroring = regexp.MustCompile("(\\.txt$|\\.zip$|\\.bin$)")
+
+func shouldMirror(name string) bool {
+	return mirroring.MatchString(name)
+}
+
+func makeUniqueName(name string, unique string) string {
+	ext := path.Ext(name)
+	noExt := strings.ReplaceAll(name, ext, "")
+	return fmt.Sprintf("%s_%s%s", noExt, unique, ext)
+}
+
+func findAllURLs(jc *jira.Client, issue *jira.Issue) []*MirroredURL {
+	urls := findInlineURLs(issue.Fields.Description)
+	for _, a := range issue.Fields.Attachments {
+		if shouldMirror(a.Filename) {
+			id := a.ID
+			name := a.Filename
+			saveAs := makeUniqueName(a.Filename, a.ID)
+			urls = append(urls, &MirroredURL{
+				Name: name,
+				Download: func(ctx context.Context, directory string) error {
+					fmt.Printf("\t%+v (mirroring)\n", saveAs)
+
+					saveAsFull := path.Join(directory, saveAs)
+
+					_, err := os.Stat(saveAsFull)
+					if os.IsNotExist(err) {
+						r, err := jc.Issue.DownloadAttachmentWithContext(ctx, id)
+						if err != nil {
+							return fmt.Errorf("downloading: %v", err)
+						}
+
+						defer r.Body.Close()
+
+						file, err := os.Create(saveAsFull)
+						if err != nil {
+							return err
+						}
+
+						defer file.Close()
+
+						if _, err := io.Copy(file, r.Body); err != nil {
+							return err
+						}
+					} else if err != nil {
+						return err
+					}
+
+					return nil
+				},
+			})
+		} else {
+			fmt.Printf("\t%+v (ignore)\n", a.Filename)
+		}
+	}
+	return urls
+}
+
+func mirror(jc *jira.Client, options *Options) error {
+	issues, _, err := jc.Issue.Search(`component IN ("Firmware", "Portal", "Backend", "Mobile App") AND resolution IS EMPTY ORDER BY updated DESC`, nil)
+	if err != nil {
+		return fmt.Errorf("error getting issues: %+v", err)
+	}
+
+	base := "/home/jlewallen/downloads/jira"
+	if err := os.MkdirAll(base, 0755); err != nil {
+		return fmt.Errorf("creating %s: %v", base, err)
+	}
+
+	files, err := ioutil.ReadDir(base)
+	if err != nil {
+		return fmt.Errorf("reading %s: %v", base, err)
+	}
+
+	ctx := context.Background()
+
+	for _, i := range issues {
+		issue, _, err := jc.Issue.Get(i.Key, nil)
+		if err != nil {
+			return fmt.Errorf("error getting issue: %+v", err)
+		}
+
+		directoryName := findExistingDirectory(issue, files)
+		if len(directoryName) == 0 {
+			directoryName = makeDirectoryName(issue)
+		}
+
+		fmt.Printf("%v -> %v (%s)\n", issue.Key, directoryName, issue.Fields.Summary)
+
+		full := path.Join(base, directoryName)
+
+		if err := os.MkdirAll(full, 0755); err != nil {
+			return nil
+		}
+
+		for _, url := range findAllURLs(jc, issue) {
+			if err := url.Download(ctx, full); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func upkeep(jc *jira.Client, options *Options) error {
 	issues, _, err := jc.Issue.Search("resolution IS EMPTY ORDER BY updated DESC", nil)
 	if err != nil {
@@ -329,6 +474,7 @@ func main() {
 	flag.BoolVar(&options.Pending, "pending", false, "issues ready for deploy")
 	flag.BoolVar(&options.DeployedPortal, "deployed-portal", false, "deployed portal")
 	flag.BoolVar(&options.DeployedApp, "deployed-app", false, "deployed app")
+	flag.BoolVar(&options.Mirror, "mirror", false, "mirror card assets")
 	flag.BoolVar(&options.Help, "help", false, "help")
 	flag.Parse()
 
@@ -352,6 +498,14 @@ func main() {
 		log.Printf("querying for issues")
 
 		if err := upkeep(jc, options); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return
+	}
+
+	if options.Mirror {
+		log.Printf("mirroring")
+		if err := mirror(jc, options); err != nil {
 			log.Fatalf("error: %v", err)
 		}
 		return
@@ -388,7 +542,7 @@ func main() {
 	}
 
 	if options.Pending {
-		search := `status IN ("Ready for Deploy") AND component IN ("Portal", "Backend", "Mobile App")`
+		search := `status IN ("Ready for Deploy") AND component IN ("Firmware", "Portal", "Backend", "Mobile App")`
 		if err := displaySearch(jc, search); err != nil {
 			log.Fatalf("error: %v", err)
 		}
