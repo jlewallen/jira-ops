@@ -269,6 +269,9 @@ func makeUniqueName(name string, unique string) string {
 
 func findAllURLs(jc *jira.Client, issue *jira.Issue) []*MirroredURL {
 	urls := findInlineURLs(issue.Key, issue.Fields.Description)
+	for _, c := range issue.Fields.Comments.Comments {
+		urls = append(urls, findInlineURLs(issue.Key, c.Body)...)
+	}
 	for _, a := range issue.Fields.Attachments {
 		if shouldMirror(a.Filename) {
 			log.Printf("[%s] attached: %+v (considering)", issue.Key, a.Filename)
