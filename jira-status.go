@@ -208,7 +208,7 @@ var spacesRegexp = regexp.MustCompile("[-_]")
 var removeRegexp = regexp.MustCompile("[:\"?'+.`!()]")
 var normalizeRegexp = regexp.MustCompile("\\s+")
 var mirroring = regexp.MustCompile("(\\.txt$|\\.zip$|\\.bin$)")
-var diagnosticsURL = regexp.MustCompile("https://code.conservify.org/diagnostics/?\\?id=([\\S]+)")
+var diagnosticsURL = regexp.MustCompile("https://code.conservify.org/diagnostics/?\\?id=([a-zA-Z0-9-]+)")
 
 type DownloadFunc func(ctx context.Context) (io.ReadCloser, error)
 
