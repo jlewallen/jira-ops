@@ -140,7 +140,7 @@ func findVersion(jc *jira.Client, projectKey, search string) (version *jira.Vers
 	matches := make([]jira.Version, 0)
 
 	for _, v := range project.Versions {
-		if !v.Archived && !v.Released {
+		if (v.Archived == nil || !*v.Archived) && (v.Released == nil || !*v.Released) {
 			if strings.Contains(v.Name, search) {
 				matches = append(matches, v)
 			}
@@ -204,7 +204,7 @@ func reversion(jc *jira.Client, options *Options) error {
 	return nil
 }
 
-var spacesRegexp = regexp.MustCompile("[-_]")
+var spacesRegexp = regexp.MustCompile("[-_\\\\/]")
 var removeRegexp = regexp.MustCompile("[:\"?'+.`!()]")
 var normalizeRegexp = regexp.MustCompile("\\s+")
 var mirroring = regexp.MustCompile("(\\.txt$|\\.zip$|\\.bin$)")
